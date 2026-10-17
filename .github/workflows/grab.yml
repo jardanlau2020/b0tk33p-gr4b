@@ -104,7 +104,7 @@ jobs:
           NOTIFY_EVERY_MINUTES: "60" # Worker 触发时启动通知的间隔
           INCLUDE_NODES: "node10"   # 只留 node10（白名单非空时黑名单失效；唔啱节点会删机重抢）
           EXCLUDE_NODES: "" # 白名单已生效，黑名单留空
-          COOLDOWN_MINUTES: "10"    # 删机器后暂停多少分钟
+          COOLDOWN_MINUTES: "3"     # 删机器后暂停多少分钟（调细＝更快重试 node10）
           SUCCESS_COOLDOWN_MINUTES: "1440" # 抢到后暂停多少分钟（24 小时）
           RUN_SECONDS: "240"
           INTERVAL_SECONDS: "20"
