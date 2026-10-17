@@ -165,6 +165,10 @@ jobs:
             python3 start_proxy.py
           fi
 
+      # 錯峰：a2 遲 60 秒先開搶，同 a1 覆蓋唔同時間點（兩 job 本來已係唔同 runner／IP）
+      - name: Stagger (错峰 60s)
+        run: sleep 60
+
       - name: Grab Botkeep server
         run: node grab.mjs
         env:
