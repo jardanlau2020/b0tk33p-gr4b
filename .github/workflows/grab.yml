@@ -4,7 +4,7 @@ run-name: ${{ inputs.source == 'worker' && 'Worker 定时触发' || (inputs.sour
 on:
   schedule:
     # GitHub 原生排程（5 分钟）；实际会被抽稀到 5-20 分钟。
-    # CF 免费版 cron 名額已用盡（5/5），所以用原生排程 + Worker 手動補觸發。
+    # CF 免费版 cron 名額已用盡（5/5），所以用原生排程 + 自鏈 + Worker 手動補觸發。
     - cron: '*/5 * * * *'
   workflow_dispatch: # 手動觸發（也可由 Worker 補觸發）；可勾选重置冷却/运行次数
     inputs:
@@ -30,7 +30,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  grab:
+  # ══════════════ 帳號 1（BOTKEEP_EMAIL / BOTKEEP_PASSWORD）══════════════
+  grab-a1:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,27 +40,25 @@ jobs:
         with:
           node-version: 20
 
-      # 读取上次的冷却时间和通知计数
       - name: Restore cooldown
         uses: actions/cache/restore@v4
         with:
-          path: .cooldown
-          key: botkeep-cooldown-${{ github.run_id }}
-          restore-keys: botkeep-cooldown-
+          path: .cooldown/a1
+          key: botkeep-cooldown-a1-${{ github.run_id }}
+          restore-keys: botkeep-cooldown-a1-
 
       - name: Read cooldown
         id: pre
-        run: echo "v=$(cat .cooldown/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+        run: echo "v=$(cat .cooldown/a1/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
 
       - name: Reset cooldown
         if: inputs.reset
-        run: mkdir -p .cooldown && echo 0 > .cooldown/until
+        run: mkdir -p .cooldown/a1 && echo 0 > .cooldown/a1/until
 
       - name: Reset run count
         if: inputs.reset_count
-        run: rm -f .cooldown/notify.json
+        run: rm -f .cooldown/a1/notify.json
 
-      # 缓存 sing-box 和 undici，避免每次下载
       - name: Cache proxy tools
         uses: actions/cache@v4
         with:
@@ -68,7 +67,6 @@ jobs:
             node_modules
           key: proxy-tools-singbox-1.14.1-undici-v1
 
-      # 可选：Secrets 里配置 PROXY_URL（vless/vmess/trojan/ss/socks5/http 节点链接）则走代理
       - name: Start proxy
         id: proxy
         env:
@@ -82,15 +80,6 @@ jobs:
             python3 start_proxy.py
           fi
 
-      - name: Notify proxy failure
-        if: failure() && steps.proxy.outcome == 'failure'
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: |
-          [ -n "$TG_BOT_TOKEN" ] && curl -s -o /dev/null "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-            --data-urlencode chat_id="$TG_CHAT_ID" --data-urlencode text="⚠️ Botkeep：代理节点连不上，本次未登录，请检查 PROXY_URL" || true
-
       - name: Grab Botkeep server
         run: node grab.mjs
         env:
@@ -98,34 +87,126 @@ jobs:
           BOTKEEP_PASSWORD: ${{ secrets.BOTKEEP_PASSWORD }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          STATE_KEY: ${{ secrets.STATE_KEY }} # 可选：缓存加密密钥，不设则由账号密码派生
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          COOLDOWN_FILE: .cooldown/a1/until
           TRIGGER: ${{ inputs.source == 'worker' && 'Worker 定时' || '手动' }}
           TRIGGER_SOURCE: ${{ inputs.source }}
-          NOTIFY_EVERY_MINUTES: "60" # Worker 触发时启动通知的间隔
-          INCLUDE_NODES: "node10"   # 只留 node10（白名单非空时黑名单失效；唔啱节点会删机重抢）
-          EXCLUDE_NODES: "" # 白名单已生效，黑名单留空
-          COOLDOWN_MINUTES: "3"     # 删机器后暂停多少分钟（调细＝更快重试 node10）
-          SUCCESS_COOLDOWN_MINUTES: "1440" # 抢到后暂停多少分钟（24 小时）
+          NOTIFY_EVERY_MINUTES: "60"
+          INCLUDE_NODES: "node10"
+          EXCLUDE_NODES: ""
+          RUNTIME: "python"
+          RAM_MB: "512"
+          CPU_PERCENT: "50"
+          STORAGE_MB: "1024"
+          COOLDOWN_MINUTES: "3"
+          SUCCESS_COOLDOWN_MINUTES: "1440"
           RUN_SECONDS: "240"
           INTERVAL_SECONDS: "20"
 
       - name: Check cooldown change
         id: post
         if: always()
-        run: echo "v=$(cat .cooldown/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+        run: echo "v=$(cat .cooldown/a1/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
 
-      # 冷却/通知计数有变化才保存，供下次运行读取
       - name: Save cooldown
-        if: always() && hashFiles('.cooldown/*') != '' && steps.post.outputs.v != steps.pre.outputs.v
+        if: always() && hashFiles('.cooldown/a1/*') != '' && steps.post.outputs.v != steps.pre.outputs.v
         uses: actions/cache/save@v4
         with:
-          path: .cooldown
-          key: botkeep-cooldown-${{ github.run_id }}
+          path: .cooldown/a1
+          key: botkeep-cooldown-a1-${{ github.run_id }}
 
-      # 自鏈：跑完即派下一次（GitHub 原生 schedule 會被抽稀，CF 免費版 cron 名額已滿 5/5）
-      # 防雙鏈：若已有其他 run 排隊/執行中，就唔派，避免指數式增生
+  # ══════════════ 帳號 2（BOTKEEP_EMAIL_2 / BOTKEEP_PASSWORD_2）══════════════
+  grab-a2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Restore cooldown
+        uses: actions/cache/restore@v4
+        with:
+          path: .cooldown/a2
+          key: botkeep-cooldown-a2-${{ github.run_id }}
+          restore-keys: botkeep-cooldown-a2-
+
+      - name: Read cooldown
+        id: pre
+        run: echo "v=$(cat .cooldown/a2/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Reset cooldown
+        if: inputs.reset
+        run: mkdir -p .cooldown/a2 && echo 0 > .cooldown/a2/until
+
+      - name: Reset run count
+        if: inputs.reset_count
+        run: rm -f .cooldown/a2/notify.json
+
+      - name: Cache proxy tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/sing-box-1.14.1
+            node_modules
+          key: proxy-tools-singbox-1.14.1-undici-v1
+
+      - name: Start proxy
+        id: proxy
+        env:
+          NODE_LINK: ${{ secrets.PROXY_URL || secrets.NODE_LINK }}
+        run: |
+          if [ -n "$NODE_LINK" ]; then
+            if [ ! -d node_modules/undici ]; then
+              echo '{}' > package.json
+              npm i --no-save --no-package-lock --no-audit --no-fund undici >/dev/null
+            fi
+            python3 start_proxy.py
+          fi
+
+      - name: Grab Botkeep server
+        run: node grab.mjs
+        env:
+          BOTKEEP_EMAIL: ${{ secrets.BOTKEEP_EMAIL_2 }}
+          BOTKEEP_PASSWORD: ${{ secrets.BOTKEEP_PASSWORD_2 }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          COOLDOWN_FILE: .cooldown/a2/until
+          TRIGGER: ${{ inputs.source == 'worker' && 'Worker 定时' || '手动' }}
+          TRIGGER_SOURCE: ${{ inputs.source }}
+          NOTIFY_EVERY_MINUTES: "60"
+          INCLUDE_NODES: "node10"
+          EXCLUDE_NODES: ""
+          RUNTIME: "python"
+          RAM_MB: "512"
+          CPU_PERCENT: "50"
+          STORAGE_MB: "1024"
+          COOLDOWN_MINUTES: "3"
+          SUCCESS_COOLDOWN_MINUTES: "1440"
+          RUN_SECONDS: "240"
+          INTERVAL_SECONDS: "20"
+
+      - name: Check cooldown change
+        id: post
+        if: always()
+        run: echo "v=$(cat .cooldown/a2/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Save cooldown
+        if: always() && hashFiles('.cooldown/a2/*') != '' && steps.post.outputs.v != steps.pre.outputs.v
+        uses: actions/cache/save@v4
+        with:
+          path: .cooldown/a2
+          key: botkeep-cooldown-a2-${{ github.run_id }}
+
+  # ══════════════ 自鏈 + 清理（兩個帳號都跑完先派下一轉）══════════════
+  chain:
+    needs: [grab-a1, grab-a2]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
       - name: Chain next run
-        if: always() && !cancelled()
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -140,11 +221,10 @@ jobs:
             -f ref=main -f "inputs[source]=chain" > /dev/null
           echo "✅ 已派下一次（source=chain）"
 
-      # 只保留最新 10 条运行记录、最新 3 个状态缓存
       - name: Clean old runs
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           gh api "repos/$REPO/actions/workflows/grab.yml/runs?per_page=100" --paginate \
@@ -153,5 +233,5 @@ jobs:
             | xargs -r -I{} gh api -X DELETE "repos/$REPO/actions/runs/{}" || true
           gh api "repos/$REPO/actions/caches?key=botkeep-cooldown-&sort=created_at&direction=desc&per_page=100" \
             -q '.actions_caches[].id' \
-            | tail -n +4 \
+            | tail -n +7 \
             | xargs -r -I{} gh api -X DELETE "repos/$REPO/actions/caches/{}" || true
