@@ -204,9 +204,98 @@ jobs:
           path: .cooldown/a2
           key: botkeep-cooldown-a2-${{ github.run_id }}
 
+  # ══════════════ 帳號 3（BOTKEEP_EMAIL_3 / BOTKEEP_PASSWORD_3）══════════════
+  grab-a3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Restore cooldown
+        uses: actions/cache/restore@v4
+        with:
+          path: .cooldown/a3
+          key: botkeep-cooldown-a3-${{ github.run_id }}
+          restore-keys: botkeep-cooldown-a3-
+
+      - name: Read cooldown
+        id: pre
+        run: echo "v=$(cat .cooldown/a3/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Reset cooldown
+        if: inputs.reset
+        run: mkdir -p .cooldown/a3 && echo 0 > .cooldown/a3/until
+
+      - name: Reset run count
+        if: inputs.reset_count
+        run: rm -f .cooldown/a3/notify.json
+
+      - name: Cache proxy tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/sing-box-1.14.1
+            node_modules
+          key: proxy-tools-singbox-1.14.1-undici-v1
+
+      - name: Start proxy
+        id: proxy
+        env:
+          NODE_LINK: ${{ secrets.PROXY_URL || secrets.NODE_LINK }}
+        run: |
+          if [ -n "$NODE_LINK" ]; then
+            if [ ! -d node_modules/undici ]; then
+              echo '{}' > package.json
+              npm i --no-save --no-package-lock --no-audit --no-fund undici >/dev/null
+            fi
+            python3 start_proxy.py
+          fi
+
+      # 錯峰：a2 遲 60 秒先開搶，同 a1 覆蓋唔同時間點（兩 job 本來已係唔同 runner／IP）
+      - name: Stagger (错峰 120s)
+        run: sleep 120
+
+      - name: Grab Botkeep server
+        run: node grab.mjs
+        env:
+          BOTKEEP_EMAIL: ${{ secrets.BOTKEEP_EMAIL_3 }}
+          BOTKEEP_PASSWORD: ${{ secrets.BOTKEEP_PASSWORD_3 }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          COOLDOWN_FILE: .cooldown/a3/until
+          TRIGGER: ${{ inputs.source == 'worker' && 'Worker 定时' || '手动' }}
+          TRIGGER_SOURCE: ${{ inputs.source }}
+          NOTIFY_EVERY_MINUTES: "60"
+          INCLUDE_NODES: "node10"
+          EXCLUDE_NODES: ""
+          RUNTIME: "python"
+          RAM_MB: "512"
+          CPU_PERCENT: "50"
+          STORAGE_MB: "1024"
+          COOLDOWN_MINUTES: "3"
+          SUCCESS_COOLDOWN_MINUTES: "1440"
+          RUN_SECONDS: "240"
+          INTERVAL_SECONDS: "20"
+
+      - name: Check cooldown change
+        id: post
+        if: always()
+        run: echo "v=$(cat .cooldown/a3/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Save cooldown
+        if: always() && hashFiles('.cooldown/a3/*') != '' && steps.post.outputs.v != steps.pre.outputs.v
+        uses: actions/cache/save@v4
+        with:
+          path: .cooldown/a3
+          key: botkeep-cooldown-a3-${{ github.run_id }}
+
   # ══════════════ 自鏈 + 清理（兩個帳號都跑完先派下一轉）══════════════
   chain:
-    needs: [grab-a1, grab-a2]
+    needs: [grab-a1, grab-a2, grab-a3]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
