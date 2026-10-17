@@ -122,6 +122,24 @@ jobs:
           path: .cooldown
           key: botkeep-cooldown-${{ github.run_id }}
 
+      # 自鏈：跑完即派下一次（GitHub 原生 schedule 會被抽稀，CF 免費版 cron 名額已滿 5/5）
+      # 防雙鏈：若已有其他 run 排隊/執行中，就唔派，避免指數式增生
+      - name: Chain next run
+        if: always() && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_RUN: ${{ github.run_id }}
+        run: |
+          set -e
+          Q=$(gh api "repos/$REPO/actions/workflows/grab.yml/runs?per_page=20" \
+              -q "[.workflow_runs[] | select(.id != ${SELF_RUN} and (.status==\"in_progress\" or .status==\"queued\"))] | length")
+          if [ "${Q:-0}" -ge 1 ]; then echo "已有 $Q 個 run 排隊/執行中，跳過派鏈"; exit 0; fi
+          sleep 120
+          gh api -X POST "repos/$REPO/actions/workflows/grab.yml/dispatches" \
+            -f ref=main -f "inputs[source]=chain" > /dev/null
+          echo "✅ 已派下一次（source=chain）"
+
       # 只保留最新 10 条运行记录、最新 3 个状态缓存
       - name: Clean old runs
         if: always()
