@@ -102,8 +102,8 @@ jobs:
           TRIGGER: ${{ inputs.source == 'worker' && 'Worker 定时' || '手动' }}
           TRIGGER_SOURCE: ${{ inputs.source }}
           NOTIFY_EVERY_MINUTES: "60" # Worker 触发时启动通知的间隔
-          INCLUDE_NODES: ""         # 白名单，逗号分隔；非空时只要这些节点，黑名单失效
-          EXCLUDE_NODES: "node2-it,node11,node9,node8" # 原版設定（黑名单，逗号分隔；白名单为空时生效）
+          INCLUDE_NODES: "node10"   # 只留 node10（白名单非空时黑名单失效；唔啱节点会删机重抢）
+          EXCLUDE_NODES: "" # 白名单已生效，黑名单留空
           COOLDOWN_MINUTES: "10"    # 删机器后暂停多少分钟
           SUCCESS_COOLDOWN_MINUTES: "1440" # 抢到后暂停多少分钟（24 小时）
           RUN_SECONDS: "240"
