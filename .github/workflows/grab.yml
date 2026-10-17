@@ -2,7 +2,11 @@ name: botkeep-grab
 run-name: ${{ inputs.source == 'worker' && 'Worker 定时触发' || '手动触发' }}
 
 on:
-  workflow_dispatch: # 由 Cloudflare Worker 定时触发；手动运行可勾选重置冷却/运行次数
+  schedule:
+    # GitHub 原生排程（5 分钟）；实际会被抽稀到 5-20 分钟。
+    # CF 免费版 cron 名額已用盡（5/5），所以用原生排程 + Worker 手動補觸發。
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # 手動觸發（也可由 Worker 補觸發）；可勾选重置冷却/运行次数
     inputs:
       reset:
         description: "重置冷却，立即开抢"
