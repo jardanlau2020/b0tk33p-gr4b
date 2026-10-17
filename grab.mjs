@@ -320,7 +320,7 @@ async function main() {
         const loc = id ? await botLocation(id, 60) : { info: '', hosts: [] };
         const bad = badNode(loc.info);
         if (bad) {
-          log(`节点不合格（${bad}），删除并暂停 ${COOLDOWN_MIN} 分钟`);
+          log(`节点不合格（${bad}）@ ${nodeLabel(loc)}，删除并暂停 ${COOLDOWN_MIN} 分钟`);
           await deleteBot(id);
           startCooldown();
           await tg(`🗑 Botkeep：抢到的机器在 ${nodeLink(loc)}（${esc(bad)}），已删除，暂停 ${COOLDOWN_MIN} 分钟后继续抢。`);
