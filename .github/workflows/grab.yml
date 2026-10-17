@@ -1,5 +1,5 @@
 name: botkeep-grab
-run-name: ${{ inputs.source == 'worker' && 'Worker 定时触发' || '手动触发' }}
+run-name: ${{ inputs.source == 'worker' && 'Worker 定时触发' || (inputs.source == 'chain' && '自链触发' || '手动触发') }}
 
 on:
   schedule:
