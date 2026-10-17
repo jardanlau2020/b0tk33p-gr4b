@@ -1,0 +1,135 @@
+name: botkeep-grab
+run-name: ${{ inputs.source == 'worker' && 'Worker 定时触发' || '手动触发' }}
+
+on:
+  workflow_dispatch: # 由 Cloudflare Worker 定时触发；手动运行可勾选重置冷却/运行次数
+    inputs:
+      reset:
+        description: "重置冷却，立即开抢"
+        type: boolean
+        default: false
+      reset_count:
+        description: "重置运行次数和尝试领取次数（从 0 重新计数）"
+        type: boolean
+        default: false
+      source:
+        description: "触发来源（Worker 传 worker）"
+        type: string
+        default: manual
+
+permissions:
+  contents: read
+  actions: write # 用于删除旧的运行记录
+
+concurrency:
+  group: botkeep-grab
+  cancel-in-progress: false
+
+jobs:
+  grab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 读取上次的冷却时间和通知计数
+      - name: Restore cooldown
+        uses: actions/cache/restore@v4
+        with:
+          path: .cooldown
+          key: botkeep-cooldown-${{ github.run_id }}
+          restore-keys: botkeep-cooldown-
+
+      - name: Read cooldown
+        id: pre
+        run: echo "v=$(cat .cooldown/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Reset cooldown
+        if: inputs.reset
+        run: mkdir -p .cooldown && echo 0 > .cooldown/until
+
+      - name: Reset run count
+        if: inputs.reset_count
+        run: rm -f .cooldown/notify.json
+
+      # 缓存 sing-box 和 undici，避免每次下载
+      - name: Cache proxy tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/sing-box-1.14.1
+            node_modules
+          key: proxy-tools-singbox-1.14.1-undici-v1
+
+      # 可选：Secrets 里配置 PROXY_URL（vless/vmess/trojan/ss/socks5/http 节点链接）则走代理
+      - name: Start proxy
+        id: proxy
+        env:
+          NODE_LINK: ${{ secrets.PROXY_URL || secrets.NODE_LINK }}
+        run: |
+          if [ -n "$NODE_LINK" ]; then
+            if [ ! -d node_modules/undici ]; then
+              echo '{}' > package.json
+              npm i --no-save --no-package-lock --no-audit --no-fund undici >/dev/null
+            fi
+            python3 start_proxy.py
+          fi
+
+      - name: Notify proxy failure
+        if: failure() && steps.proxy.outcome == 'failure'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          [ -n "$TG_BOT_TOKEN" ] && curl -s -o /dev/null "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+            --data-urlencode chat_id="$TG_CHAT_ID" --data-urlencode text="⚠️ Botkeep：代理节点连不上，本次未登录，请检查 PROXY_URL" || true
+
+      - name: Grab Botkeep server
+        run: node grab.mjs
+        env:
+          BOTKEEP_EMAIL: ${{ secrets.BOTKEEP_EMAIL }}
+          BOTKEEP_PASSWORD: ${{ secrets.BOTKEEP_PASSWORD }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          STATE_KEY: ${{ secrets.STATE_KEY }} # 可选：缓存加密密钥，不设则由账号密码派生
+          TRIGGER: ${{ inputs.source == 'worker' && 'Worker 定时' || '手动' }}
+          TRIGGER_SOURCE: ${{ inputs.source }}
+          NOTIFY_EVERY_MINUTES: "60" # Worker 触发时启动通知的间隔
+          INCLUDE_NODES: ""         # 白名单，逗号分隔；非空时只要这些节点，黑名单失效
+          EXCLUDE_NODES: "" # 黑名单，逗号分隔；白名单为空时生效
+          COOLDOWN_MINUTES: "10"    # 删机器后暂停多少分钟
+          SUCCESS_COOLDOWN_MINUTES: "1440" # 抢到后暂停多少分钟（24 小时）
+          RUN_SECONDS: "240"
+          INTERVAL_SECONDS: "20"
+
+      - name: Check cooldown change
+        id: post
+        if: always()
+        run: echo "v=$(cat .cooldown/* 2>/dev/null | md5sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      # 冷却/通知计数有变化才保存，供下次运行读取
+      - name: Save cooldown
+        if: always() && hashFiles('.cooldown/*') != '' && steps.post.outputs.v != steps.pre.outputs.v
+        uses: actions/cache/save@v4
+        with:
+          path: .cooldown
+          key: botkeep-cooldown-${{ github.run_id }}
+
+      # 只保留最新 10 条运行记录、最新 3 个状态缓存
+      - name: Clean old runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/actions/workflows/grab.yml/runs?per_page=100" --paginate \
+            -q '.workflow_runs[] | select(.status=="completed") | .id' \
+            | tail -n +11 \
+            | xargs -r -I{} gh api -X DELETE "repos/$REPO/actions/runs/{}" || true
+          gh api "repos/$REPO/actions/caches?key=botkeep-cooldown-&sort=created_at&direction=desc&per_page=100" \
+            -q '.actions_caches[].id' \
+            | tail -n +4 \
+            | xargs -r -I{} gh api -X DELETE "repos/$REPO/actions/caches/{}" || true
